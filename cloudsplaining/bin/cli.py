@@ -25,6 +25,7 @@ cloudsplaining.add_command(command.expand_policy.expand_policy)
 cloudsplaining.add_command(command.scan.scan)
 cloudsplaining.add_command(command.scan_policy_file.scan_policy_file)
 cloudsplaining.add_command(command.download.download)
+cloudsplaining.add_command(command.download.download_from_org)
 
 
 def main():

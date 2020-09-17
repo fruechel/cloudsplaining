@@ -67,6 +67,114 @@ def download(profile, output, include_non_default_policy_versions):
     return 1
 
 
+
+
+@click.command(
+    short_help="Runs aws iam get-authorization-details on all accounts within an organisation and stores them in a file per account, using the name and account ID."
+)
+@click.option(
+    "--payer-account-id",
+    type=str,
+    required=True,
+    help="The account ID of the payer account which is the owner of the organisation. ListAccounts will be called against this account.",
+)
+@click.option(
+    "--target-audit-role",
+    type=str,
+    required=True,
+    help="The target role to assume in each account. Most have ListAccounts permission for payer account and GetAccountAuthorizationDetails on all accounts",
+)
+@click.option(
+    "--output",
+    type=click.Path(exists=True),
+    default=Path.cwd(),
+    help="Path to store the output. Defaults to current directory.",
+)
+@click.option(
+    "--include-non-default-policy-versions",
+    is_flag=True,
+    default=False,
+    help="When downloading AWS managed policy documents, also include the non-default policy versions."
+    " Note that this will dramatically increase the size of the downloaded file.",
+)
+@click.option(
+    "--overwrite-existing",
+    is_flag=True,
+    default=False,
+    help="Re-download existing files rather than skipping them.",
+)
+@click.option(
+    "--exclude-account",
+    multiple=True,
+    help="An account ID for which data shouldn't be downloaded even though it's part of the organisation. Can be specified multiple times.",
+)
+@click_log.simple_verbosity_option(logger)
+def download_from_org(output, payer_account_id, target_audit_role, include_non_default_policy_versions, overwrite_existing, exclude_account):
+    """
+    Runs aws iam get-authorization-details on all accounts within an organisation and stores them in a file per account, using the name and account ID.
+    """
+    payer_session_data = get_cross_account_session_data(payer_account_id, target_audit_role)
+    accounts = get_accounts_for_org(payer_session_data, exclude_account)
+    for account in accounts.values():
+        acc_name = account["Name"]
+        acc_id = account["Id"]
+        output_filename = os.path.join(output, f"auth-details-{acc_name}-{acc_id}.json")
+        if not overwrite_existing and os.path.exists(output_filename):
+            continue
+
+        acc_session_data = get_cross_account_session_data(acc_id, target_audit_role)
+        results = get_account_authorization_details(acc_session_data, include_non_default_policy_versions)
+
+        with open(output_filename, "w") as file:
+            json.dump(results, file, indent=4, default=str)
+            print(f"Saved results to {output_filename}")
+
+
+def get_accounts_for_org(payer_session_data, exclude_accounts=None):
+    "Runs list-accounts to fetch all active accounts (minus excluded ones)"
+    if exclude_accounts is None:
+        exclude_accounts = []
+
+    payer_session = boto3.Session(**payer_session_data)
+    orgs = payer_session.client('organizations')
+    paginator = orgs.get_paginator('list_accounts')
+    page_iterator = paginator.paginate()
+    accounts_data = []
+    for page in page_iterator:
+        accounts_data += page['Accounts']
+
+    accounts = {}
+    for acc in accounts_data:
+        if acc['Status'] != 'ACTIVE':
+            # Don't track suspended accounts
+            continue
+        if acc['Id'] in exclude_accounts:
+            # Exclude this account from results
+            continue
+        accounts[acc['Id']] = {
+            'Name': acc['Name'],
+            'Id': acc['Id'],
+            'Arn': acc['Arn'],
+        }
+    return accounts
+
+
+def get_cross_account_session_data(account_id, role_name):
+    target_role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
+    # This is a thread-safe way of getting a new client
+    sts = boto3.session.Session().client('sts')
+    response = sts.assume_role(
+        RoleArn=target_role_arn,
+        RoleSessionName='cloudsplaining',
+    )
+
+    # Return session data
+    return dict(
+        aws_access_key_id=response['Credentials']['AccessKeyId'],
+        aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+        aws_session_token=response['Credentials']['SessionToken'])
+
+
 def get_account_authorization_details(session_data, include_non_default_policy_versions):
     """Runs aws-iam-get-account-authorization-details"""
     session = boto3.Session(**session_data)
